@@ -4,6 +4,9 @@ import json
 import logging
 import requests
 
+from PIL import Image
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Iterator
 
 
@@ -50,9 +53,9 @@ def url_ok(url: URL, session: requests.Session = requests.Session()) -> bool:
     return r.status_code == 200
 
 
-def manga_fetcher(base_url: str,
-                  startfrom: int = 0,
-                  session: requests.Session = None) -> Iterator[URL]:
+def page_fetcher(base_url: str,
+                 startfrom: int = 0,
+                 session: requests.Session = None) -> Iterator[URL]:
     """Check if the next page number exists
 
     :param base_url:  The base url format for fetching pages.
@@ -74,10 +77,33 @@ def manga_fetcher(base_url: str,
         index += 1
 
 
+def download_file(url: URL,
+                  output_dir: Path,
+                  session: requests.Session) -> Path:
+    """Download a file.
+
+    :param url:        the url of the file to download.
+    :param output_dir: the target directory to save the file to.
+    :param session :   the request session.
+
+    :return: The name of the downloaded file
+    """
+    local_filename = url.split('/')[-1]
+    local_filename = output_dir / Path(local_filename)
+
+    with session.get(url, stream=True) as stream:
+        stream.raise_for_status()
+        with open(local_filename, 'wb') as output:
+            for chunk in stream.iter_content(chunk_size=2048):
+                output.write(chunk)
+
+    return local_filename
+
+
 def fetch_book(url: URL,
                get_format: str,
-               destfile: str,
-               chapter: int = 1) -> None:
+               destfile: Path,
+               chapter: int = 1) -> bool:
     """Fetch a manga book from a collection of images online.
 
     :param url:        The url to fetch the manga from.
@@ -88,14 +114,32 @@ def fetch_book(url: URL,
                             - page    : the specific page to fetch.
     :param chapter:    The chapter to fetch.
     :param destfile:   The name of the file to save the completed manga to.
+
+    :return: True if fetched the file, False otherwise.
     """
     logging.debug(f'{url=} {get_format=} {chapter=} {destfile=}')
 
     target = get_format.format(url=url, chapter=chapter, page='{page}')
     session = requests.Session()  # type: requests.Session
 
-    for page in manga_fetcher(target, startfrom=1, session=session):
-        logging.info(f'fetching {page}')
+    if not url_ok(target.format(page=1)):
+        logging.info('couldn\'t fetch the first page of {chapter = }')
+        return False
+
+    images = []  # type: list
+
+    with TemporaryDirectory() as tmpdir:
+        for page in page_fetcher(target, startfrom=1, session=session):
+            logging.info(f'downloading {page}')
+            images.append(Image.open(download_file(page,
+                                                   Path(tmpdir),
+                                                   session))
+                          .convert('RGB'))
+
+    logging.info(f'saving images of chapter {chapter} to PDF ({destfile})')
+    images[0].save(destfile, save_all=True, append_images=images[1:])
+
+    return True
 
 
 def main():
